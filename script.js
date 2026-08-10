@@ -34,6 +34,9 @@ function colorFor(name) {
   for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) % PALETTE.length;
   return PALETTE[Math.abs(h)];
 }
+function colorForPerson(name) {
+  return myName && name && name.toLowerCase() === myName.toLowerCase() && myColor ? myColor : colorFor(name);
+}
 function pad(n) {
   return n < 10 ? '0' + n : '' + n;
 }
@@ -50,6 +53,7 @@ const MONTHS = ['jan', 'feb', 'mrt', 'apr', 'mei', 'jun', 'jul', 'aug', 'sep', '
 
 let reservations = [];
 let myName = '';
+let myColor = '';
 let currentProfileId = '';
 let selectedDate = fmtDateKey(new Date());
 let showingAll = false;
@@ -145,19 +149,22 @@ async function loadMyName() {
     const profiles = readProfiles();
     const profile = profiles[profileId];
     myName = profile && profile.name ? profile.name : '';
+    myColor = profile && profile.color ? profile.color : '';
   } catch (e) {
     myName = '';
+    myColor = '';
   }
 }
-async function saveMyName(n, createNewProfile = false) {
+async function saveMyName(n, createNewProfile = false, color = myColor) {
   try {
     const profiles = readProfiles();
     const profileId = createNewProfile ? `profile-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}` : ensureProfileId();
-    profiles[profileId] = { name: n, updatedAt: Date.now() };
+    profiles[profileId] = { name: n, color: color || '', updatedAt: Date.now() };
     writeProfiles(profiles);
     currentProfileId = profileId;
     localStorage.setItem('reservatie-current-profile-id', profileId);
     myName = n;
+    myColor = color || '';
   } catch (e) {
     console.error('Opslaan naam mislukt', e);
   }
@@ -169,7 +176,7 @@ function overlaps(dateKey, start, end, excludeId) {
 
 function renderMe() {
   document.getElementById('meLabel').textContent = myName || 'Kies naam';
-  document.getElementById('meDot').style.background = myName ? colorFor(myName) : '#666';
+  document.getElementById('meDot').style.background = myName ? myColor || colorFor(myName) : '#666';
 }
 
 function renderNextUp() {
@@ -229,13 +236,12 @@ function renderCalendar() {
     const names = namesForDate(key);
     const dotsHtml = names
       .slice(0, 4)
-      .map((n) => `<span style="background:${colorFor(n)}"></span>`)
+      .map((n) => `<span style="background:${colorForPerson(n)}"></span>`)
       .join('');
     cell.innerHTML = `<div>${d.getDate()}</div><div class="dots">${dotsHtml}</div>`;
     if (!isPast) {
       cell.addEventListener('click', () => {
         selectedDate = key;
-        showingAll = false;
         if (isOtherMonth) {
           viewYear = d.getFullYear();
           viewMonth = d.getMonth();
@@ -258,28 +264,7 @@ function renderDayPanel() {
   const title = document.getElementById('panelTitle');
   const sub = document.getElementById('panelSub');
   const list = document.getElementById('resList');
-  const toggleBtn = document.getElementById('toggleAll');
 
-  if (showingAll) {
-    title.textContent = 'Alle komende reservaties';
-    const now = new Date();
-    const nowKey = fmtDateKey(now);
-    const upcoming = reservations.filter((r) => r.date >= nowKey).sort((a, b) => (a.date + a.start).localeCompare(b.date + b.start));
-    sub.textContent = `${upcoming.length} gepland`;
-    toggleBtn.textContent = '← Terug naar dagweergave';
-    list.innerHTML = '';
-    if (upcoming.length === 0) {
-      list.innerHTML = `<div class="empty">Nog geen reservaties gepland.</div>`;
-      return;
-    }
-    upcoming.forEach((r) => {
-      const d = parseDateKey(r.date);
-      list.appendChild(buildCard(r, `${DOW[d.getDay()]} ${d.getDate()} ${MONTHS[d.getMonth()]}, ${r.start}–${r.end}`));
-    });
-    return;
-  }
-
-  toggleBtn.textContent = 'Bekijk alle komende reservaties';
   const d = parseDateKey(selectedDate);
   const today = fmtDateKey(new Date());
   title.textContent = selectedDate === today ? 'Vandaag' : `${DOW_FULL[d.getDay()]} ${d.getDate()} ${MONTHS[d.getMonth()]}`;
@@ -298,7 +283,7 @@ function renderDayPanel() {
 function buildCard(r, timeLabel) {
   const card = document.createElement('div');
   card.className = 'res-card';
-  card.style.borderLeftColor = colorFor(r.name);
+  card.style.borderLeftColor = colorForPerson(r.name);
   const canDelete = r.name === myName;
   card.innerHTML = `
     <div class="time">${timeLabel}</div>
@@ -422,24 +407,20 @@ document.getElementById('calToday').addEventListener('click', () => {
   viewYear = now.getFullYear();
   viewMonth = now.getMonth();
   selectedDate = fmtDateKey(now);
-  showingAll = false;
   renderAll();
-});
-
-document.getElementById('toggleAll').addEventListener('click', () => {
-  showingAll = !showingAll;
-  renderDayPanel();
 });
 
 // name flow
 const nameOverlay = document.getElementById('nameOverlay');
 document.getElementById('meEdit').addEventListener('click', () => {
   document.getElementById('nameInput').value = myName;
+  document.getElementById('colorInput').value = myColor || '#e8a33d';
   nameOverlay.classList.add('open');
 });
 document.getElementById('mePill').addEventListener('click', (e) => {
   if (e.target.id === 'meEdit') return;
   document.getElementById('nameInput').value = myName;
+  document.getElementById('colorInput').value = myColor || '#e8a33d';
   nameOverlay.classList.add('open');
 });
 document.getElementById('nameCancel').addEventListener('click', () => nameOverlay.classList.remove('open'));
@@ -449,8 +430,9 @@ nameOverlay.addEventListener('click', (e) => {
 document.getElementById('nameSave').addEventListener('click', async () => {
   const v = document.getElementById('nameInput').value.trim();
   if (!v) return;
+  const color = document.getElementById('colorInput').value;
   const createNewProfile = !!myName && v.toLowerCase() !== myName.toLowerCase();
-  await saveMyName(v, createNewProfile);
+  await saveMyName(v, createNewProfile, color);
   nameOverlay.classList.remove('open');
   renderAll();
 });
