@@ -26,7 +26,24 @@ async function supabaseRequest(path, options = {}) {
     throw new Error(text || 'Supabase request failed');
   }
 
-  return response.status === 204 ? null : response.json();
+  if (response.status === 204) {
+    return null;
+  }
+
+  const text = await response.text();
+  if (!text) {
+    return null;
+  }
+
+  try {
+    return JSON.parse(text);
+  } catch (e) {
+    return text;
+  }
+}
+
+function normalizeName(value) {
+  return (value || '').trim().toLowerCase();
 }
 
 function colorFor(name) {
@@ -35,7 +52,7 @@ function colorFor(name) {
   return PALETTE[Math.abs(h)];
 }
 function colorForPerson(name) {
-  return myName && name && name.toLowerCase() === myName.toLowerCase() && myColor ? myColor : colorFor(name);
+  return myName && name && normalizeName(name) === normalizeName(myName) && myColor ? myColor : colorFor(name);
 }
 function pad(n) {
   return n < 10 ? '0' + n : '' + n;
@@ -134,9 +151,13 @@ async function saveReservations() {
     });
 
     for (const id of idsToDelete) {
-      await supabaseRequest(`reservations?id=eq.${encodeURIComponent(id)}`, {
-        method: 'DELETE',
-      });
+      try {
+        await supabaseRequest(`reservations?id=eq.${encodeURIComponent(id)}`, {
+          method: 'DELETE',
+        });
+      } catch (deleteError) {
+        console.warn('Delete skipped for stale row', id, deleteError);
+      }
     }
   } catch (e) {
     console.error('Opslaan mislukt', e);
@@ -148,7 +169,7 @@ async function loadMyName() {
     const profileId = ensureProfileId();
     const profiles = readProfiles();
     const profile = profiles[profileId];
-    myName = profile && profile.name ? profile.name : '';
+    myName = profile && profile.name ? profile.name.trim() : '';
     myColor = profile && profile.color ? profile.color : '';
   } catch (e) {
     myName = '';
@@ -157,13 +178,14 @@ async function loadMyName() {
 }
 async function saveMyName(n, createNewProfile = false, color = myColor) {
   try {
+    const cleanName = (n || '').trim();
     const profiles = readProfiles();
     const profileId = createNewProfile ? `profile-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}` : ensureProfileId();
-    profiles[profileId] = { name: n, color: color || '', updatedAt: Date.now() };
+    profiles[profileId] = { name: cleanName, color: color || '', updatedAt: Date.now() };
     writeProfiles(profiles);
     currentProfileId = profileId;
     localStorage.setItem('reservatie-current-profile-id', profileId);
-    myName = n;
+    myName = cleanName;
     myColor = color || '';
   } catch (e) {
     console.error('Opslaan naam mislukt', e);
@@ -284,7 +306,7 @@ function buildCard(r, timeLabel) {
   const card = document.createElement('div');
   card.className = 'res-card';
   card.style.borderLeftColor = colorForPerson(r.name);
-  const canDelete = r.name === myName;
+  const canDelete = normalizeName(r.name) === normalizeName(myName);
   card.innerHTML = `
     <div class="time">${timeLabel}</div>
     <div class="mid">
