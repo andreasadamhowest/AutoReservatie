@@ -1,5 +1,34 @@
 const PALETTE = ['#e8a33d', '#6fa876', '#d6524a', '#7aa7d6', '#c98fd6', '#d6b25a', '#5ac1b8'];
 
+const SUPABASE_URL = 'https://tcqnxxhhkxashblpmeii.supabase.co';
+const SUPABASE_ANON_KEY = 'sb_publishable_-H8t6IEnxwkVHCFbCZWz8w_HcobMQzw';
+
+function createReservationId() {
+  if (window.crypto && window.crypto.randomUUID) {
+    return window.crypto.randomUUID();
+  }
+  return `res-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+async function supabaseRequest(path, options = {}) {
+  const response = await fetch(`${SUPABASE_URL}/rest/v1/${path}`, {
+    ...options,
+    headers: {
+      apikey: SUPABASE_ANON_KEY,
+      Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
+      'Content-Type': 'application/json',
+      ...(options.headers || {}),
+    },
+  });
+
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(text || 'Supabase request failed');
+  }
+
+  return response.status === 204 ? null : response.json();
+}
+
 function colorFor(name) {
   let h = 0;
   for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) % PALETTE.length;
@@ -61,15 +90,50 @@ function ensureProfileId() {
 
 async function loadReservations() {
   try {
-    const r = await window.storage.get('reservations', true);
-    reservations = r && r.value ? JSON.parse(r.value) : [];
+    const data = await supabaseRequest('reservations?select=id,date,start_time,end_time,name,note');
+    reservations = (data || []).map((r) => ({
+      id: r.id,
+      date: r.date,
+      start: r.start_time,
+      end: r.end_time,
+      name: r.name,
+      note: r.note || '',
+    }));
   } catch (e) {
+    console.error('Load reservations failed', e);
     reservations = [];
   }
 }
+
 async function saveReservations() {
   try {
-    await window.storage.set('reservations', JSON.stringify(reservations), true);
+    const payload = reservations.map((r) => ({
+      id: r.id || createReservationId(),
+      date: r.date,
+      start_time: r.start,
+      end_time: r.end,
+      name: r.name,
+      note: r.note || '',
+    }));
+
+    const existing = await supabaseRequest('reservations?select=id');
+    const existingIds = new Set((existing || []).map((row) => row.id));
+    const currentIds = new Set(reservations.map((r) => r.id));
+    const idsToDelete = [...existingIds].filter((id) => !currentIds.has(id));
+
+    await supabaseRequest('reservations?on_conflict=id', {
+      method: 'POST',
+      headers: {
+        Prefer: 'resolution=merge-duplicates',
+      },
+      body: JSON.stringify(payload),
+    });
+
+    for (const id of idsToDelete) {
+      await supabaseRequest(`reservations?id=eq.${encodeURIComponent(id)}`, {
+        method: 'DELETE',
+      });
+    }
   } catch (e) {
     console.error('Opslaan mislukt', e);
     alert('Opslaan is mislukt. Probeer opnieuw.');
@@ -319,7 +383,7 @@ document.getElementById('saveAdd').addEventListener('click', async () => {
     return;
   }
   reservations.push({
-    id: Date.now().toString(36) + Math.random().toString(36).slice(2, 7),
+    id: createReservationId(),
     date,
     start,
     end,
