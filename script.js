@@ -1,9 +1,98 @@
 const PALETTE = ['#e8a33d', '#6fa876', '#d6524a', '#7aa7d6', '#c98fd6', '#d6b25a', '#5ac1b8'];
+const COLOR_OPTIONS = ['#e8a33d', '#6fa876', '#d6524a', '#7aa7d6', '#c98fd6', '#5ac1b8', '#f0b24b', '#4f9d69'];
+const SUPABASE_URL = 'https://tcqnxxhhkxashblpmeii.supabase.co';
+const SUPABASE_ANON_KEY = 'sb_publishable_-H8t6IEnxwkVHCFbCZWz8w_HcobMQzw';
+const RESERVATIONS_ENDPOINT = `${SUPABASE_URL}/rest/v1/reservations`;
+const RESERVATION_COLUMNS = 'id,date,start_time,end_time,name,note';
+const REFRESH_INTERVAL_MS = 15000;
+
+function createReservationId() {
+  if (window.crypto && window.crypto.randomUUID) {
+    return window.crypto.randomUUID();
+  }
+  return `res-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+async function apiRequest(url, options = {}) {
+  const response = await fetch(url, {
+    ...options,
+    headers: {
+      apikey: SUPABASE_ANON_KEY,
+      Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
+      'Content-Type': 'application/json',
+      ...(options.headers || {}),
+    },
+  });
+
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(text || 'Reservaties ophalen of opslaan is mislukt');
+  }
+
+  if (response.status === 204) {
+    return null;
+  }
+
+  const text = await response.text();
+  if (!text) {
+    return null;
+  }
+
+  try {
+    return JSON.parse(text);
+  } catch (e) {
+    return text;
+  }
+}
+
+function normalizeReservation(entry) {
+  return {
+    id: entry.id,
+    date: entry.date,
+    start: entry.start_time || entry.start || '',
+    end: entry.end_time || entry.end || '',
+    name: entry.name || '',
+    note: entry.note || '',
+  };
+}
+
+function toSupabaseReservation(entry) {
+  return {
+    id: entry.id || createReservationId(),
+    date: entry.date,
+    start_time: entry.start,
+    end_time: entry.end,
+    name: entry.name,
+    note: entry.note || '',
+  };
+}
+
+function reservationSnapshot(list) {
+  return JSON.stringify(
+    [...list]
+      .sort((a, b) => `${a.date}${a.start}${a.id}`.localeCompare(`${b.date}${b.start}${b.id}`))
+      .map((r) => ({
+        id: r.id,
+        date: r.date,
+        start: r.start,
+        end: r.end,
+        name: r.name,
+        note: r.note || '',
+      }))
+  );
+}
+
+function normalizeName(value) {
+  return (value || '').trim().toLowerCase();
+}
 
 function colorFor(name) {
   let h = 0;
   for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) % PALETTE.length;
   return PALETTE[Math.abs(h)];
+}
+function colorForPerson(name) {
+  return myName && name && normalizeName(name) === normalizeName(myName) && myColor ? myColor : colorFor(name);
 }
 function pad(n) {
   return n < 10 ? '0' + n : '' + n;
@@ -21,11 +110,18 @@ const MONTHS = ['jan', 'feb', 'mrt', 'apr', 'mei', 'jun', 'jul', 'aug', 'sep', '
 
 let reservations = [];
 let myName = '';
+let myColor = '';
 let currentProfileId = '';
+let pendingDeleteId = null;
 let selectedDate = fmtDateKey(new Date());
 let showingAll = false;
 let viewYear = new Date().getFullYear();
 let viewMonth = new Date().getMonth();
+let lastReservationsSnapshot = '';
+let syncTimer = null;
+let supabaseClient = null;
+let reservationsChannel = null;
+const localSyncChannel = typeof BroadcastChannel !== 'undefined' ? new BroadcastChannel('reservatie-reservations') : null;
 
 function readProfiles() {
   try {
@@ -59,41 +155,138 @@ function ensureProfileId() {
   return currentProfileId;
 }
 
-async function loadReservations() {
+async function fetchReservations() {
   try {
-    const r = await window.storage.get('reservations', true);
-    reservations = r && r.value ? JSON.parse(r.value) : [];
+    const data = await apiRequest(`${RESERVATIONS_ENDPOINT}?select=${RESERVATION_COLUMNS}`);
+    return Array.isArray(data) ? data.map(normalizeReservation) : [];
   } catch (e) {
-    reservations = [];
+    console.error('Load reservations failed', e);
+    return [];
   }
 }
+
+async function loadReservations() {
+  reservations = await fetchReservations();
+  lastReservationsSnapshot = reservationSnapshot(reservations);
+}
+
+async function refreshReservations() {
+  const nextReservations = await fetchReservations();
+  const nextSnapshot = reservationSnapshot(nextReservations);
+  if (nextSnapshot === lastReservationsSnapshot) return;
+  reservations = nextReservations;
+  lastReservationsSnapshot = nextSnapshot;
+  renderAll();
+}
+
+function notifyReservationSync() {
+  if (localSyncChannel) {
+    localSyncChannel.postMessage({ type: 'reservations:updated' });
+  }
+
+  try {
+    localStorage.setItem('reservatie-reservations-updated-at', String(Date.now()));
+  } catch (e) {
+    // Storage sync is best-effort for other tabs on the same device.
+  }
+}
+
+function startPollingSync() {
+  if (syncTimer) return;
+  syncTimer = window.setInterval(() => {
+    refreshReservations();
+  }, REFRESH_INTERVAL_MS);
+}
+
 async function saveReservations() {
   try {
-    await window.storage.set('reservations', JSON.stringify(reservations), true);
+    const payload = reservations.map(toSupabaseReservation);
+    const existing = await apiRequest(`${RESERVATIONS_ENDPOINT}?select=id`);
+    const existingIds = new Set((existing || []).map((row) => row.id));
+    const currentIds = new Set(payload.map((reservation) => reservation.id));
+    const idsToDelete = [...existingIds].filter((id) => !currentIds.has(id));
+
+    if (payload.length) {
+      await apiRequest(`${RESERVATIONS_ENDPOINT}?on_conflict=id`, {
+        method: 'POST',
+        headers: { Prefer: 'resolution=merge-duplicates' },
+        body: JSON.stringify(payload),
+      });
+    }
+
+    for (const id of idsToDelete) {
+      await apiRequest(`${RESERVATIONS_ENDPOINT}?id=eq.${encodeURIComponent(id)}`, { method: 'DELETE' });
+    }
+
+    lastReservationsSnapshot = reservationSnapshot(reservations);
+    notifyReservationSync();
   } catch (e) {
     console.error('Opslaan mislukt', e);
     alert('Opslaan is mislukt. Probeer opnieuw.');
   }
+}
+
+function setupRealtimeSync() {
+  if (localSyncChannel) {
+    localSyncChannel.addEventListener('message', (event) => {
+      if (event.data && event.data.type === 'reservations:updated') {
+        refreshReservations();
+      }
+    });
+  }
+
+  window.addEventListener('storage', (event) => {
+    if (event.key === 'reservatie-reservations-updated-at') {
+      refreshReservations();
+    }
+  });
+
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) {
+      refreshReservations();
+    }
+  });
+
+  if (window.supabase && typeof window.supabase.createClient === 'function') {
+    supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+    reservationsChannel = supabaseClient
+      .channel('reservations-sync')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'reservations' }, () => {
+        refreshReservations();
+      })
+      .subscribe((status) => {
+        if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT' || status === 'CLOSED') {
+          startPollingSync();
+        }
+      });
+    return;
+  }
+
+  startPollingSync();
 }
 async function loadMyName() {
   try {
     const profileId = ensureProfileId();
     const profiles = readProfiles();
     const profile = profiles[profileId];
-    myName = profile && profile.name ? profile.name : '';
+    myName = profile && profile.name ? profile.name.trim() : '';
+    myColor = profile && profile.color ? profile.color : '';
   } catch (e) {
     myName = '';
+    myColor = '';
   }
 }
-async function saveMyName(n, createNewProfile = false) {
+async function saveMyName(n, createNewProfile = false, color = myColor) {
   try {
+    const cleanName = (n || '').trim();
     const profiles = readProfiles();
     const profileId = createNewProfile ? `profile-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}` : ensureProfileId();
-    profiles[profileId] = { name: n, updatedAt: Date.now() };
+    profiles[profileId] = { name: cleanName, color: color || '', updatedAt: Date.now() };
     writeProfiles(profiles);
     currentProfileId = profileId;
     localStorage.setItem('reservatie-current-profile-id', profileId);
-    myName = n;
+    myName = cleanName;
+    myColor = color || '';
   } catch (e) {
     console.error('Opslaan naam mislukt', e);
   }
@@ -105,7 +298,26 @@ function overlaps(dateKey, start, end, excludeId) {
 
 function renderMe() {
   document.getElementById('meLabel').textContent = myName || 'Kies naam';
-  document.getElementById('meDot').style.background = myName ? colorFor(myName) : '#666';
+  document.getElementById('meDot').style.background = myName ? myColor || colorFor(myName) : '#666';
+}
+
+function renderColorOptions() {
+  const container = document.getElementById('colorOptions');
+  if (!container) return;
+  container.innerHTML = '';
+  COLOR_OPTIONS.forEach((color) => {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'color-option' + (myColor === color ? ' active' : '');
+    btn.style.background = color;
+    btn.setAttribute('data-color', color);
+    btn.addEventListener('click', () => {
+      myColor = color;
+      document.querySelectorAll('.color-option').forEach((el) => el.classList.toggle('active', el.getAttribute('data-color') === color));
+      renderMe();
+    });
+    container.appendChild(btn);
+  });
 }
 
 function renderNextUp() {
@@ -165,13 +377,12 @@ function renderCalendar() {
     const names = namesForDate(key);
     const dotsHtml = names
       .slice(0, 4)
-      .map((n) => `<span style="background:${colorFor(n)}"></span>`)
+      .map((n) => `<span style="background:${colorForPerson(n)}"></span>`)
       .join('');
     cell.innerHTML = `<div>${d.getDate()}</div><div class="dots">${dotsHtml}</div>`;
     if (!isPast) {
       cell.addEventListener('click', () => {
         selectedDate = key;
-        showingAll = false;
         if (isOtherMonth) {
           viewYear = d.getFullYear();
           viewMonth = d.getMonth();
@@ -194,28 +405,7 @@ function renderDayPanel() {
   const title = document.getElementById('panelTitle');
   const sub = document.getElementById('panelSub');
   const list = document.getElementById('resList');
-  const toggleBtn = document.getElementById('toggleAll');
 
-  if (showingAll) {
-    title.textContent = 'Alle komende reservaties';
-    const now = new Date();
-    const nowKey = fmtDateKey(now);
-    const upcoming = reservations.filter((r) => r.date >= nowKey).sort((a, b) => (a.date + a.start).localeCompare(b.date + b.start));
-    sub.textContent = `${upcoming.length} gepland`;
-    toggleBtn.textContent = '← Terug naar dagweergave';
-    list.innerHTML = '';
-    if (upcoming.length === 0) {
-      list.innerHTML = `<div class="empty">Nog geen reservaties gepland.</div>`;
-      return;
-    }
-    upcoming.forEach((r) => {
-      const d = parseDateKey(r.date);
-      list.appendChild(buildCard(r, `${DOW[d.getDay()]} ${d.getDate()} ${MONTHS[d.getMonth()]}, ${r.start}–${r.end}`));
-    });
-    return;
-  }
-
-  toggleBtn.textContent = 'Bekijk alle komende reservaties';
   const d = parseDateKey(selectedDate);
   const today = fmtDateKey(new Date());
   title.textContent = selectedDate === today ? 'Vandaag' : `${DOW_FULL[d.getDay()]} ${d.getDate()} ${MONTHS[d.getMonth()]}`;
@@ -234,8 +424,8 @@ function renderDayPanel() {
 function buildCard(r, timeLabel) {
   const card = document.createElement('div');
   card.className = 'res-card';
-  card.style.borderLeftColor = colorFor(r.name);
-  const canDelete = r.name === myName;
+  card.style.borderLeftColor = colorForPerson(r.name);
+  const canDelete = normalizeName(r.name) === normalizeName(myName);
   card.innerHTML = `
     <div class="time">${timeLabel}</div>
     <div class="mid">
@@ -246,12 +436,11 @@ function buildCard(r, timeLabel) {
   `;
   const delBtn = card.querySelector('.del');
   if (delBtn) {
-    delBtn.addEventListener('click', async () => {
-      if (confirm('Deze reservatie verwijderen?')) {
-        reservations = reservations.filter((x) => x.id !== r.id);
-        await saveReservations();
-        renderAll();
-      }
+    delBtn.addEventListener('click', () => {
+      if (!deleteOverlay) return;
+      pendingDeleteId = r.id;
+      document.getElementById('deleteMessage').textContent = `Weet je zeker dat je deze reservatie wilt verwijderen?`;
+      deleteOverlay.classList.add('open');
     });
   }
   return card;
@@ -259,6 +448,7 @@ function buildCard(r, timeLabel) {
 
 function renderAll() {
   renderMe();
+  renderColorOptions();
   renderNextUp();
   renderCalendar();
   renderDayPanel();
@@ -319,7 +509,7 @@ document.getElementById('saveAdd').addEventListener('click', async () => {
     return;
   }
   reservations.push({
-    id: Date.now().toString(36) + Math.random().toString(36).slice(2, 7),
+    id: createReservationId(),
     date,
     start,
     end,
@@ -358,24 +548,23 @@ document.getElementById('calToday').addEventListener('click', () => {
   viewYear = now.getFullYear();
   viewMonth = now.getMonth();
   selectedDate = fmtDateKey(now);
-  showingAll = false;
   renderAll();
-});
-
-document.getElementById('toggleAll').addEventListener('click', () => {
-  showingAll = !showingAll;
-  renderDayPanel();
 });
 
 // name flow
 const nameOverlay = document.getElementById('nameOverlay');
+const deleteOverlay = document.getElementById('deleteOverlay');
 document.getElementById('meEdit').addEventListener('click', () => {
   document.getElementById('nameInput').value = myName;
+  myColor = myColor || COLOR_OPTIONS[0];
+  renderColorOptions();
   nameOverlay.classList.add('open');
 });
 document.getElementById('mePill').addEventListener('click', (e) => {
   if (e.target.id === 'meEdit') return;
   document.getElementById('nameInput').value = myName;
+  myColor = myColor || COLOR_OPTIONS[0];
+  renderColorOptions();
   nameOverlay.classList.add('open');
 });
 document.getElementById('nameCancel').addEventListener('click', () => nameOverlay.classList.remove('open'));
@@ -385,13 +574,36 @@ nameOverlay.addEventListener('click', (e) => {
 document.getElementById('nameSave').addEventListener('click', async () => {
   const v = document.getElementById('nameInput').value.trim();
   if (!v) return;
+  const color = myColor || COLOR_OPTIONS[0];
   const createNewProfile = !!myName && v.toLowerCase() !== myName.toLowerCase();
-  await saveMyName(v, createNewProfile);
+  await saveMyName(v, createNewProfile, color);
   nameOverlay.classList.remove('open');
   renderAll();
 });
 
+if (deleteOverlay) {
+  document.getElementById('deleteCancel').addEventListener('click', () => {
+    pendingDeleteId = null;
+    deleteOverlay.classList.remove('open');
+  });
+  deleteOverlay.addEventListener('click', (e) => {
+    if (e.target === deleteOverlay) {
+      pendingDeleteId = null;
+      deleteOverlay.classList.remove('open');
+    }
+  });
+  document.getElementById('deleteConfirm').addEventListener('click', async () => {
+    if (!pendingDeleteId) return;
+    reservations = reservations.filter((x) => x.id !== pendingDeleteId);
+    pendingDeleteId = null;
+    deleteOverlay.classList.remove('open');
+    await saveReservations();
+    renderAll();
+  });
+}
+
 async function init() {
+  setupRealtimeSync();
   await Promise.all([loadReservations(), loadMyName()]);
   document.getElementById('loading').style.display = 'none';
   document.getElementById('app').style.display = 'block';
