@@ -262,5 +262,11 @@
     width:100%;background:var(--surface2);border:1px solid var(--border);color:var(--text);
     border-radius:8px;padding:10px 11px;font-size:14px;margin-bottom:12px;
   }
+  .color-field{margin-top:4px;}
+  .color-field label{display:block;font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.4px;margin-bottom:8px;}
+  .color-options{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:4px;}
+  .color-option{width:34px;height:34px;border-radius:50%;border:2px solid transparent;cursor:pointer;transition:transform .12s ease,border-color .12s ease;background:none;padding:0;}
+  .color-option.active{border-color:var(--text);transform:scale(1.04);}
+  .confirm-sheet p{margin:0 0 16px;color:var(--text-muted);font-size:14px;line-height:1.5;}
 
   #loading{text-align:center;padding:60px 0;color:var(--text-muted);font-size:13px;}

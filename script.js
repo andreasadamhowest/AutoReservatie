@@ -1,4 +1,5 @@
 const PALETTE = ['#e8a33d', '#6fa876', '#d6524a', '#7aa7d6', '#c98fd6', '#d6b25a', '#5ac1b8'];
+const COLOR_OPTIONS = ['#e8a33d', '#6fa876', '#d6524a', '#7aa7d6', '#c98fd6', '#5ac1b8', '#f0b24b', '#4f9d69'];
 
 const SUPABASE_URL = 'https://tcqnxxhhkxashblpmeii.supabase.co';
 const SUPABASE_ANON_KEY = 'sb_publishable_-H8t6IEnxwkVHCFbCZWz8w_HcobMQzw';
@@ -72,6 +73,7 @@ let reservations = [];
 let myName = '';
 let myColor = '';
 let currentProfileId = '';
+let pendingDeleteId = null;
 let selectedDate = fmtDateKey(new Date());
 let showingAll = false;
 let viewYear = new Date().getFullYear();
@@ -201,6 +203,25 @@ function renderMe() {
   document.getElementById('meDot').style.background = myName ? myColor || colorFor(myName) : '#666';
 }
 
+function renderColorOptions() {
+  const container = document.getElementById('colorOptions');
+  if (!container) return;
+  container.innerHTML = '';
+  COLOR_OPTIONS.forEach((color) => {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'color-option' + (myColor === color ? ' active' : '');
+    btn.style.background = color;
+    btn.setAttribute('data-color', color);
+    btn.addEventListener('click', () => {
+      myColor = color;
+      document.querySelectorAll('.color-option').forEach((el) => el.classList.toggle('active', el.getAttribute('data-color') === color));
+      renderMe();
+    });
+    container.appendChild(btn);
+  });
+}
+
 function renderNextUp() {
   const now = new Date();
   const nowKey = fmtDateKey(now);
@@ -317,12 +338,10 @@ function buildCard(r, timeLabel) {
   `;
   const delBtn = card.querySelector('.del');
   if (delBtn) {
-    delBtn.addEventListener('click', async () => {
-      if (confirm('Deze reservatie verwijderen?')) {
-        reservations = reservations.filter((x) => x.id !== r.id);
-        await saveReservations();
-        renderAll();
-      }
+    delBtn.addEventListener('click', () => {
+      pendingDeleteId = r.id;
+      document.getElementById('deleteMessage').textContent = `Weet je zeker dat je deze reservatie wilt verwijderen?`;
+      deleteOverlay.classList.add('open');
     });
   }
   return card;
@@ -330,6 +349,7 @@ function buildCard(r, timeLabel) {
 
 function renderAll() {
   renderMe();
+  renderColorOptions();
   renderNextUp();
   renderCalendar();
   renderDayPanel();
@@ -434,15 +454,18 @@ document.getElementById('calToday').addEventListener('click', () => {
 
 // name flow
 const nameOverlay = document.getElementById('nameOverlay');
+const deleteOverlay = document.getElementById('deleteOverlay');
 document.getElementById('meEdit').addEventListener('click', () => {
   document.getElementById('nameInput').value = myName;
-  document.getElementById('colorInput').value = myColor || '#e8a33d';
+  myColor = myColor || COLOR_OPTIONS[0];
+  renderColorOptions();
   nameOverlay.classList.add('open');
 });
 document.getElementById('mePill').addEventListener('click', (e) => {
   if (e.target.id === 'meEdit') return;
   document.getElementById('nameInput').value = myName;
-  document.getElementById('colorInput').value = myColor || '#e8a33d';
+  myColor = myColor || COLOR_OPTIONS[0];
+  renderColorOptions();
   nameOverlay.classList.add('open');
 });
 document.getElementById('nameCancel').addEventListener('click', () => nameOverlay.classList.remove('open'));
@@ -452,10 +475,29 @@ nameOverlay.addEventListener('click', (e) => {
 document.getElementById('nameSave').addEventListener('click', async () => {
   const v = document.getElementById('nameInput').value.trim();
   if (!v) return;
-  const color = document.getElementById('colorInput').value;
+  const color = myColor || COLOR_OPTIONS[0];
   const createNewProfile = !!myName && v.toLowerCase() !== myName.toLowerCase();
   await saveMyName(v, createNewProfile, color);
   nameOverlay.classList.remove('open');
+  renderAll();
+});
+
+document.getElementById('deleteCancel').addEventListener('click', () => {
+  pendingDeleteId = null;
+  deleteOverlay.classList.remove('open');
+});
+deleteOverlay.addEventListener('click', (e) => {
+  if (e.target === deleteOverlay) {
+    pendingDeleteId = null;
+    deleteOverlay.classList.remove('open');
+  }
+});
+document.getElementById('deleteConfirm').addEventListener('click', async () => {
+  if (!pendingDeleteId) return;
+  reservations = reservations.filter((x) => x.id !== pendingDeleteId);
+  pendingDeleteId = null;
+  deleteOverlay.classList.remove('open');
+  await saveReservations();
   renderAll();
 });
 
