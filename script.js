@@ -1,8 +1,10 @@
 const PALETTE = ['#e8a33d', '#6fa876', '#d6524a', '#7aa7d6', '#c98fd6', '#d6b25a', '#5ac1b8'];
 const COLOR_OPTIONS = ['#e8a33d', '#6fa876', '#d6524a', '#7aa7d6', '#c98fd6', '#5ac1b8', '#f0b24b', '#4f9d69'];
-
 const SUPABASE_URL = 'https://tcqnxxhhkxashblpmeii.supabase.co';
 const SUPABASE_ANON_KEY = 'sb_publishable_-H8t6IEnxwkVHCFbCZWz8w_HcobMQzw';
+const RESERVATIONS_ENDPOINT = `${SUPABASE_URL}/rest/v1/reservations`;
+const RESERVATION_COLUMNS = 'id,date,start_time,end_time,name,note';
+const REFRESH_INTERVAL_MS = 15000;
 
 function createReservationId() {
   if (window.crypto && window.crypto.randomUUID) {
@@ -11,8 +13,8 @@ function createReservationId() {
   return `res-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
-async function supabaseRequest(path, options = {}) {
-  const response = await fetch(`${SUPABASE_URL}/rest/v1/${path}`, {
+async function apiRequest(url, options = {}) {
+  const response = await fetch(url, {
     ...options,
     headers: {
       apikey: SUPABASE_ANON_KEY,
@@ -24,7 +26,7 @@ async function supabaseRequest(path, options = {}) {
 
   if (!response.ok) {
     const text = await response.text();
-    throw new Error(text || 'Supabase request failed');
+    throw new Error(text || 'Reservaties ophalen of opslaan is mislukt');
   }
 
   if (response.status === 204) {
@@ -41,6 +43,43 @@ async function supabaseRequest(path, options = {}) {
   } catch (e) {
     return text;
   }
+}
+
+function normalizeReservation(entry) {
+  return {
+    id: entry.id,
+    date: entry.date,
+    start: entry.start_time || entry.start || '',
+    end: entry.end_time || entry.end || '',
+    name: entry.name || '',
+    note: entry.note || '',
+  };
+}
+
+function toSupabaseReservation(entry) {
+  return {
+    id: entry.id || createReservationId(),
+    date: entry.date,
+    start_time: entry.start,
+    end_time: entry.end,
+    name: entry.name,
+    note: entry.note || '',
+  };
+}
+
+function reservationSnapshot(list) {
+  return JSON.stringify(
+    [...list]
+      .sort((a, b) => `${a.date}${a.start}${a.id}`.localeCompare(`${b.date}${b.start}${b.id}`))
+      .map((r) => ({
+        id: r.id,
+        date: r.date,
+        start: r.start,
+        end: r.end,
+        name: r.name,
+        note: r.note || '',
+      }))
+  );
 }
 
 function normalizeName(value) {
@@ -78,6 +117,11 @@ let selectedDate = fmtDateKey(new Date());
 let showingAll = false;
 let viewYear = new Date().getFullYear();
 let viewMonth = new Date().getMonth();
+let lastReservationsSnapshot = '';
+let syncTimer = null;
+let supabaseClient = null;
+let reservationsChannel = null;
+const localSyncChannel = typeof BroadcastChannel !== 'undefined' ? new BroadcastChannel('reservatie-reservations') : null;
 
 function readProfiles() {
   try {
@@ -111,60 +155,114 @@ function ensureProfileId() {
   return currentProfileId;
 }
 
-async function loadReservations() {
+async function fetchReservations() {
   try {
-    const data = await supabaseRequest('reservations?select=id,date,start_time,end_time,name,note');
-    reservations = (data || []).map((r) => ({
-      id: r.id,
-      date: r.date,
-      start: r.start_time,
-      end: r.end_time,
-      name: r.name,
-      note: r.note || '',
-    }));
+    const data = await apiRequest(`${RESERVATIONS_ENDPOINT}?select=${RESERVATION_COLUMNS}`);
+    return Array.isArray(data) ? data.map(normalizeReservation) : [];
   } catch (e) {
     console.error('Load reservations failed', e);
-    reservations = [];
+    return [];
   }
+}
+
+async function loadReservations() {
+  reservations = await fetchReservations();
+  lastReservationsSnapshot = reservationSnapshot(reservations);
+}
+
+async function refreshReservations() {
+  const nextReservations = await fetchReservations();
+  const nextSnapshot = reservationSnapshot(nextReservations);
+  if (nextSnapshot === lastReservationsSnapshot) return;
+  reservations = nextReservations;
+  lastReservationsSnapshot = nextSnapshot;
+  renderAll();
+}
+
+function notifyReservationSync() {
+  if (localSyncChannel) {
+    localSyncChannel.postMessage({ type: 'reservations:updated' });
+  }
+
+  try {
+    localStorage.setItem('reservatie-reservations-updated-at', String(Date.now()));
+  } catch (e) {
+    // Storage sync is best-effort for other tabs on the same device.
+  }
+}
+
+function startPollingSync() {
+  if (syncTimer) return;
+  syncTimer = window.setInterval(() => {
+    refreshReservations();
+  }, REFRESH_INTERVAL_MS);
 }
 
 async function saveReservations() {
   try {
-    const payload = reservations.map((r) => ({
-      id: r.id || createReservationId(),
-      date: r.date,
-      start_time: r.start,
-      end_time: r.end,
-      name: r.name,
-      note: r.note || '',
-    }));
-
-    const existing = await supabaseRequest('reservations?select=id');
+    const payload = reservations.map(toSupabaseReservation);
+    const existing = await apiRequest(`${RESERVATIONS_ENDPOINT}?select=id`);
     const existingIds = new Set((existing || []).map((row) => row.id));
-    const currentIds = new Set(reservations.map((r) => r.id));
+    const currentIds = new Set(payload.map((reservation) => reservation.id));
     const idsToDelete = [...existingIds].filter((id) => !currentIds.has(id));
 
-    await supabaseRequest('reservations?on_conflict=id', {
-      method: 'POST',
-      headers: {
-        Prefer: 'resolution=merge-duplicates',
-      },
-      body: JSON.stringify(payload),
-    });
+    if (payload.length) {
+      await apiRequest(`${RESERVATIONS_ENDPOINT}?on_conflict=id`, {
+        method: 'POST',
+        headers: { Prefer: 'resolution=merge-duplicates' },
+        body: JSON.stringify(payload),
+      });
+    }
 
     for (const id of idsToDelete) {
-      try {
-        await supabaseRequest(`reservations?id=eq.${encodeURIComponent(id)}`, {
-          method: 'DELETE',
-        });
-      } catch (deleteError) {
-        console.warn('Delete skipped for stale row', id, deleteError);
-      }
+      await apiRequest(`${RESERVATIONS_ENDPOINT}?id=eq.${encodeURIComponent(id)}`, { method: 'DELETE' });
     }
+
+    lastReservationsSnapshot = reservationSnapshot(reservations);
+    notifyReservationSync();
   } catch (e) {
     console.error('Opslaan mislukt', e);
     alert('Opslaan is mislukt. Probeer opnieuw.');
   }
+}
+
+function setupRealtimeSync() {
+  if (localSyncChannel) {
+    localSyncChannel.addEventListener('message', (event) => {
+      if (event.data && event.data.type === 'reservations:updated') {
+        refreshReservations();
+      }
+    });
+  }
+
+  window.addEventListener('storage', (event) => {
+    if (event.key === 'reservatie-reservations-updated-at') {
+      refreshReservations();
+    }
+  });
+
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) {
+      refreshReservations();
+    }
+  });
+
+  if (window.supabase && typeof window.supabase.createClient === 'function') {
+    supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+    reservationsChannel = supabaseClient
+      .channel('reservations-sync')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'reservations' }, () => {
+        refreshReservations();
+      })
+      .subscribe((status) => {
+        if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT' || status === 'CLOSED') {
+          startPollingSync();
+        }
+      });
+    return;
+  }
+
+  startPollingSync();
 }
 async function loadMyName() {
   try {
@@ -505,6 +603,7 @@ if (deleteOverlay) {
 }
 
 async function init() {
+  setupRealtimeSync();
   await Promise.all([loadReservations(), loadMyName()]);
   document.getElementById('loading').style.display = 'none';
   document.getElementById('app').style.display = 'block';
