@@ -339,6 +339,7 @@ function buildCard(r, timeLabel) {
   const delBtn = card.querySelector('.del');
   if (delBtn) {
     delBtn.addEventListener('click', () => {
+      if (!deleteOverlay) return;
       pendingDeleteId = r.id;
       document.getElementById('deleteMessage').textContent = `Weet je zeker dat je deze reservatie wilt verwijderen?`;
       deleteOverlay.classList.add('open');
@@ -482,24 +483,26 @@ document.getElementById('nameSave').addEventListener('click', async () => {
   renderAll();
 });
 
-document.getElementById('deleteCancel').addEventListener('click', () => {
-  pendingDeleteId = null;
-  deleteOverlay.classList.remove('open');
-});
-deleteOverlay.addEventListener('click', (e) => {
-  if (e.target === deleteOverlay) {
+if (deleteOverlay) {
+  document.getElementById('deleteCancel').addEventListener('click', () => {
     pendingDeleteId = null;
     deleteOverlay.classList.remove('open');
-  }
-});
-document.getElementById('deleteConfirm').addEventListener('click', async () => {
-  if (!pendingDeleteId) return;
-  reservations = reservations.filter((x) => x.id !== pendingDeleteId);
-  pendingDeleteId = null;
-  deleteOverlay.classList.remove('open');
-  await saveReservations();
-  renderAll();
-});
+  });
+  deleteOverlay.addEventListener('click', (e) => {
+    if (e.target === deleteOverlay) {
+      pendingDeleteId = null;
+      deleteOverlay.classList.remove('open');
+    }
+  });
+  document.getElementById('deleteConfirm').addEventListener('click', async () => {
+    if (!pendingDeleteId) return;
+    reservations = reservations.filter((x) => x.id !== pendingDeleteId);
+    pendingDeleteId = null;
+    deleteOverlay.classList.remove('open');
+    await saveReservations();
+    renderAll();
+  });
+}
 
 async function init() {
   await Promise.all([loadReservations(), loadMyName()]);
